@@ -56,9 +56,9 @@ cmd_init() {
       exit 1
     fi
     local gist_url
-    gist_url=$(gh gist create --private "$LOCK_FILE" --filename ".skill-lock.json" 2>&1)
+    gist_url=$(gh gist create "$LOCK_FILE" --filename ".skill-lock.json" 2>&1)
     local gist_id
-    gist_id=$(echo "$gist_url" | grep -oE '[a-f0-9]{20,}' | tail -1)
+    gist_id=$(echo "$gist_url" | grep -oE '[a-f0-9]{20,}' | tail -1 || true)
     if [ -z "$gist_id" ]; then
       echo "Error: Failed to create gist. Output: $gist_url"
       exit 1
