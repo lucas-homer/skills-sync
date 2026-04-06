@@ -3,6 +3,7 @@ set -euo pipefail
 
 LOCK_FILE="$HOME/.agents/.skill-lock.json"
 CONFIG_FILE="$HOME/.agents/.skills-sync-config"
+SKILLS_DIR="$HOME/.agents/skills"
 
 # --- Dependency checks ---
 check_deps() {
@@ -91,18 +92,18 @@ cmd_pull() {
   local remote_lock
   remote_lock=$(gh gist view "$gist_id" --filename ".skill-lock.json" --raw)
 
-  # Show what will change
-  local remote_skills local_skills
+  # Compare remote lock against what's actually on disk
+  local remote_skills installed_skills
   remote_skills=$(echo "$remote_lock" | jq -r '.skills | keys[]' | sort)
-  if [ -f "$LOCK_FILE" ]; then
-    local_skills=$(jq -r '.skills | keys[]' "$LOCK_FILE" | sort)
+  if [ -d "$SKILLS_DIR" ]; then
+    installed_skills=$(ls "$SKILLS_DIR" 2>/dev/null | sort)
   else
-    local_skills=""
+    installed_skills=""
   fi
 
   local to_install local_only
-  to_install=$(comm -23 <(echo "$remote_skills") <(echo "$local_skills") || true)
-  local_only=$(comm -13 <(echo "$remote_skills") <(echo "$local_skills") || true)
+  to_install=$(comm -23 <(echo "$remote_skills") <(echo "$installed_skills") || true)
+  local_only=$(comm -13 <(echo "$remote_skills") <(echo "$installed_skills") || true)
 
   if [ -n "$to_install" ]; then
     echo "Skills to install:"
@@ -155,14 +156,14 @@ cmd_pull() {
     echo "Done."
   fi
 
-  # Only update local lock file if all remote skills are now installed
-  local post_local_skills remaining
-  if [ -f "$LOCK_FILE" ]; then
-    post_local_skills=$(jq -r '.skills | keys[]' "$LOCK_FILE" | sort)
+  # Only update local lock file if all remote skills are now on disk
+  local post_installed remaining
+  if [ -d "$SKILLS_DIR" ]; then
+    post_installed=$(ls "$SKILLS_DIR" 2>/dev/null | sort)
   else
-    post_local_skills=""
+    post_installed=""
   fi
-  remaining=$(comm -23 <(echo "$remote_skills") <(echo "$post_local_skills") || true)
+  remaining=$(comm -23 <(echo "$remote_skills") <(echo "$post_installed") || true)
 
   if [ -n "$remaining" ]; then
     echo ""
