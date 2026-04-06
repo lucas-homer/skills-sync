@@ -139,7 +139,7 @@ cmd_pull() {
 
       echo "  From $source: $skills_for_source"
       # shellcheck disable=SC2086
-      npx skills add "$source" -g --skill $skills_for_source --agent '*' -y || \
+      npx --yes skills add "$source" -g --skill $skills_for_source --agent '*' -y || \
         echo "  Warning: Failed to install from $source"
     done < <(
       printf '%s\n' "$to_install" | jq -Rn --argjson lock "$remote_lock" '
@@ -155,8 +155,26 @@ cmd_pull() {
     echo "Done."
   fi
 
-  # Update local lock file with remote
-  echo "$remote_lock" > "$LOCK_FILE"
+  # Only update local lock file if all remote skills are now installed
+  local post_local_skills remaining
+  if [ -f "$LOCK_FILE" ]; then
+    post_local_skills=$(jq -r '.skills | keys[]' "$LOCK_FILE" | sort)
+  else
+    post_local_skills=""
+  fi
+  remaining=$(comm -23 <(echo "$remote_skills") <(echo "$post_local_skills") || true)
+
+  if [ -n "$remaining" ]; then
+    echo ""
+    echo "Warning: some remote skills are still missing locally:"
+    while IFS= read -r skill; do
+      [ -z "$skill" ] && continue
+      echo "  ! $skill"
+    done <<< "$remaining"
+    echo "Local lock file was not updated. Re-run 'skills-sync pull' to retry."
+  else
+    echo "$remote_lock" > "$LOCK_FILE"
+  fi
 }
 
 cmd_status() {
