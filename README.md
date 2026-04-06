@@ -62,9 +62,6 @@ skills-sync push
 # Pull remote lock file and install missing skills
 skills-sync pull
 
-# Pull and remove local-only skills
-skills-sync pull --prune
-
 # Show diff between local and remote
 skills-sync status
 ```
