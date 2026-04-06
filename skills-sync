@@ -125,12 +125,56 @@ cmd_pull() {
     return
   fi
 
-  # Overwrite local lock file with remote and restore
-  echo ""
-  echo "Updating lock file and installing..."
-  echo "$remote_lock" > "$LOCK_FILE"
-  npx skills experimental_install
-  echo "Done."
+  # Install missing skills, grouped by source in a single jq pass
+  if [ -n "$to_install" ]; then
+    echo ""
+    echo "Installing..."
+
+    while IFS=$'\t' read -r source skills_for_source; do
+      [ -z "$source" ] && continue
+      if [ "$source" = "null" ]; then
+        echo "  Warning: Skipping skills with no source: $skills_for_source"
+        continue
+      fi
+
+      echo "  From $source: $skills_for_source"
+      # shellcheck disable=SC2086
+      npx --yes skills add "$source" -g --skill $skills_for_source --agent '*' -y || \
+        echo "  Warning: Failed to install from $source"
+    done < <(
+      printf '%s\n' "$to_install" | jq -Rn --argjson lock "$remote_lock" '
+        [inputs | select(length > 0)] as $skills
+        | $skills
+        | map({skill: ., source: $lock.skills[.].source})
+        | group_by(.source)[]
+        | [(.[0].source // "null"), (map(.skill) | join(" "))]
+        | @tsv
+      '
+    )
+
+    echo "Done."
+  fi
+
+  # Only update local lock file if all remote skills are now installed
+  local post_local_skills remaining
+  if [ -f "$LOCK_FILE" ]; then
+    post_local_skills=$(jq -r '.skills | keys[]' "$LOCK_FILE" | sort)
+  else
+    post_local_skills=""
+  fi
+  remaining=$(comm -23 <(echo "$remote_skills") <(echo "$post_local_skills") || true)
+
+  if [ -n "$remaining" ]; then
+    echo ""
+    echo "Warning: some remote skills are still missing locally:"
+    while IFS= read -r skill; do
+      [ -z "$skill" ] && continue
+      echo "  ! $skill"
+    done <<< "$remaining"
+    echo "Local lock file was not updated. Re-run 'skills-sync pull' to retry."
+  else
+    echo "$remote_lock" > "$LOCK_FILE"
+  fi
 }
 
 cmd_status() {
@@ -174,8 +218,8 @@ cmd_status() {
   while IFS= read -r skill; do
     [ -z "$skill" ] && continue
     local local_hash remote_hash
-    local_hash=$(jq -r ".skills[\"$skill\"].skillFolderHash" "$LOCK_FILE")
-    remote_hash=$(echo "$remote_lock" | jq -r ".skills[\"$skill\"].skillFolderHash")
+    local_hash=$(jq -r --arg skill "$skill" '.skills[$skill].skillFolderHash' "$LOCK_FILE")
+    remote_hash=$(echo "$remote_lock" | jq -r --arg skill "$skill" '.skills[$skill].skillFolderHash')
     if [ "$local_hash" != "$remote_hash" ]; then
       changed+="  ~ $skill (hash differs)\n"
     fi
