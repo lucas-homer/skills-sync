@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOCK_FILE="$HOME/.agents/.skill-lock.json"
+CONFIG_FILE="$HOME/.agents/.skills-sync-config"
+
+# --- Dependency checks ---
+check_deps() {
+  local missing=()
+  if ! command -v gh &>/dev/null; then
+    missing+=("gh (install: brew install gh, then: gh auth login)")
+  fi
+  if ! command -v jq &>/dev/null; then
+    missing+=("jq (install: brew install jq)")
+  fi
+  if ! command -v npx &>/dev/null; then
+    missing+=("npx (install Node.js ≥18: brew install node)")
+  fi
+  if [ ${#missing[@]} -gt 0 ]; then
+    echo "Error: missing dependencies:"
+    for dep in "${missing[@]}"; do
+      echo "  - $dep"
+    done
+    exit 1
+  fi
+}
+
+# --- Helpers ---
+read_gist_id() {
+  if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Error: No sync config found. Run 'skills-sync init' first." >&2
+    exit 1
+  fi
+  jq -r '.gist_id' "$CONFIG_FILE"
+}
+
+# --- Commands ---
+cmd_init() {
+  if [ ! -f "$LOCK_FILE" ]; then
+    echo "Error: No .skill-lock.json found at $LOCK_FILE"
+    echo "Install a skill first: npx skills add anthropics/skills"
+    exit 1
+  fi
+
+  if [ -n "${1:-}" ]; then
+    # Link to existing gist
+    local gist_id="$1"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    printf '{"gist_id":"%s"}\n' "$gist_id" > "$CONFIG_FILE"
+    echo "Linked to existing gist: $gist_id"
+  else
+    # Create new private gist
+    if [ -f "$CONFIG_FILE" ]; then
+      echo "Already initialized. Gist ID: $(jq -r '.gist_id' "$CONFIG_FILE")"
+      echo "To re-initialize, delete $CONFIG_FILE first."
+      exit 1
+    fi
+    local gist_url
+    gist_url=$(gh gist create --private "$LOCK_FILE" --filename ".skill-lock.json" 2>&1)
+    local gist_id
+    gist_id=$(echo "$gist_url" | grep -oE '[a-f0-9]{20,}' | tail -1)
+    if [ -z "$gist_id" ]; then
+      echo "Error: Failed to create gist. Output: $gist_url"
+      exit 1
+    fi
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    printf '{"gist_id":"%s"}\n' "$gist_id" > "$CONFIG_FILE"
+    echo "Created private gist: $gist_id"
+    echo "On other machines, run: skills-sync init $gist_id"
+  fi
+}
+
+cmd_push() {
+  local gist_id
+  gist_id=$(read_gist_id)
+
+  if [ ! -f "$LOCK_FILE" ]; then
+    echo "Error: No lock file at $LOCK_FILE"
+    exit 1
+  fi
+
+  gh gist edit "$gist_id" --filename ".skill-lock.json" "$LOCK_FILE"
+  echo "Pushed lock file to gist."
+}
+
+cmd_pull() {
+  local prune=false
+  if [ "${1:-}" = "--prune" ]; then
+    prune=true
+  fi
+
+  local gist_id
+  gist_id=$(read_gist_id)
+
+  # Download remote lock file
+  local remote_lock
+  remote_lock=$(gh gist view "$gist_id" --filename ".skill-lock.json" --raw)
+
+  if [ ! -f "$LOCK_FILE" ]; then
+    echo "No local lock file. Creating from remote..."
+    echo "$remote_lock" > "$LOCK_FILE"
+  fi
+
+  # Find skills in remote but not local → install
+  local remote_skills local_skills
+  remote_skills=$(echo "$remote_lock" | jq -r '.skills | keys[]' | sort)
+  local_skills=$(jq -r '.skills | keys[]' "$LOCK_FILE" | sort)
+
+  local to_install
+  to_install=$(comm -23 <(echo "$remote_skills") <(echo "$local_skills"))
+  local local_only
+  local_only=$(comm -13 <(echo "$remote_skills") <(echo "$local_skills"))
+
+  if [ -n "$to_install" ]; then
+    echo "Installing missing skills..."
+    while IFS= read -r skill; do
+      [ -z "$skill" ] && continue
+      local source
+      source=$(echo "$remote_lock" | jq -r ".skills[\"$skill\"].source")
+      echo "  Installing: $skill (from $source)"
+      npx skills add "$source" || echo "  Warning: Failed to install $skill"
+    done <<< "$to_install"
+  else
+    echo "All remote skills are installed locally."
+  fi
+
+  if [ -n "$local_only" ]; then
+    if [ "$prune" = true ]; then
+      echo "Pruning local-only skills..."
+      while IFS= read -r skill; do
+        [ -z "$skill" ] && continue
+        echo "  Removing: $skill"
+        npx skills remove "$skill" || echo "  Warning: Failed to remove $skill"
+      done <<< "$local_only"
+    else
+      echo ""
+      echo "Local-only skills (not in remote):"
+      while IFS= read -r skill; do
+        [ -z "$skill" ] && continue
+        echo "  - $skill"
+      done <<< "$local_only"
+      echo "Use 'skills-sync pull --prune' to remove them."
+    fi
+  fi
+}
+
+cmd_status() {
+  local gist_id
+  gist_id=$(read_gist_id)
+
+  local remote_lock
+  remote_lock=$(gh gist view "$gist_id" --filename ".skill-lock.json" --raw)
+
+  local remote_skills local_skills
+  remote_skills=$(echo "$remote_lock" | jq -r '.skills | keys[]' | sort)
+  local_skills=$(jq -r '.skills | keys[]' "$LOCK_FILE" | sort)
+
+  local remote_only local_only common
+  remote_only=$(comm -23 <(echo "$remote_skills") <(echo "$local_skills"))
+  local_only=$(comm -13 <(echo "$remote_skills") <(echo "$local_skills"))
+  common=$(comm -12 <(echo "$remote_skills") <(echo "$local_skills"))
+
+  local has_diff=false
+
+  if [ -n "$remote_only" ]; then
+    has_diff=true
+    echo "Remote-only (will be installed on pull):"
+    while IFS= read -r skill; do
+      [ -z "$skill" ] && continue
+      echo "  + $skill"
+    done <<< "$remote_only"
+  fi
+
+  if [ -n "$local_only" ]; then
+    has_diff=true
+    echo "Local-only (not in remote):"
+    while IFS= read -r skill; do
+      [ -z "$skill" ] && continue
+      echo "  - $skill"
+    done <<< "$local_only"
+  fi
+
+  # Check for hash differences in common skills
+  local changed=""
+  while IFS= read -r skill; do
+    [ -z "$skill" ] && continue
+    local local_hash remote_hash
+    local_hash=$(jq -r ".skills[\"$skill\"].skillFolderHash" "$LOCK_FILE")
+    remote_hash=$(echo "$remote_lock" | jq -r ".skills[\"$skill\"].skillFolderHash")
+    if [ "$local_hash" != "$remote_hash" ]; then
+      changed+="  ~ $skill (hash differs)\n"
+    fi
+  done <<< "$common"
+
+  if [ -n "$changed" ]; then
+    has_diff=true
+    echo "Changed (different versions):"
+    printf "%b" "$changed"
+  fi
+
+  if [ "$has_diff" = false ]; then
+    echo "In sync. No differences between local and remote."
+  fi
+}
+
+cmd_add() {
+  if [ $# -eq 0 ]; then
+    echo "Usage: skills-sync add <source>"
+    echo "Example: skills-sync add anthropics/skills"
+    exit 1
+  fi
+
+  npx skills add "$@"
+
+  if [ -f "$CONFIG_FILE" ]; then
+    echo ""
+    echo "Pushing updated lock file..."
+    cmd_push
+  else
+    echo ""
+    echo "Note: Sync not initialized. Run 'skills-sync init' to enable syncing."
+  fi
+}
+
+cmd_help() {
+  cat <<'HELP'
+skills-sync — keep your agent skills in sync across machines
+
+Usage:
+  skills-sync init [<gist-id>]   Initialize sync (create or link to a gist)
+  skills-sync push               Upload local lock file to gist
+  skills-sync pull [--prune]     Download remote lock file and install missing skills
+  skills-sync status             Show diff between local and remote
+  skills-sync add <source>       Install a skill and push the updated lock file
+
+Examples:
+  skills-sync init                    # First machine: create gist
+  skills-sync init abc123def456       # Other machines: link to existing gist
+  skills-sync add anthropics/skills   # Install + sync
+  skills-sync pull                    # Sync from remote
+HELP
+}
+
+# --- Main ---
+check_deps
+
+case "${1:-}" in
+  init)   shift; cmd_init "$@" ;;
+  push)   cmd_push ;;
+  pull)   shift; cmd_pull "$@" ;;
+  status) cmd_status ;;
+  add)    shift; cmd_add "$@" ;;
+  help|--help|-h) cmd_help ;;
+  *)
+    cmd_help
+    exit 1
+    ;;
+esac
