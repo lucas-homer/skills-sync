@@ -2,18 +2,24 @@
 set -euo pipefail
 
 INSTALL_DIR="$HOME/.local/bin"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_NAME="skills-sync"
+REPO_RAW="https://raw.githubusercontent.com/lucas-homer/skills-sync/master"
 
 echo "Installing skills-sync..."
 
 # Create install directory
 mkdir -p "$INSTALL_DIR"
 
-# Copy script
-cp "$SCRIPT_DIR/$SCRIPT_NAME" "$INSTALL_DIR/$SCRIPT_NAME"
+# If running from a local clone, copy the script; otherwise download it
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/$SCRIPT_NAME" ]; then
+  cp "$SCRIPT_DIR/$SCRIPT_NAME" "$INSTALL_DIR/$SCRIPT_NAME"
+  echo "  Copied $SCRIPT_NAME to $INSTALL_DIR/"
+else
+  curl -sSL "$REPO_RAW/$SCRIPT_NAME" -o "$INSTALL_DIR/$SCRIPT_NAME"
+  echo "  Downloaded $SCRIPT_NAME to $INSTALL_DIR/"
+fi
 chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
-echo "  Copied $SCRIPT_NAME to $INSTALL_DIR/"
 
 # Ensure ~/.local/bin is in PATH
 add_to_path() {
