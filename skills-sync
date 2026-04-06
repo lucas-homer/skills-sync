@@ -125,48 +125,38 @@ cmd_pull() {
     return
   fi
 
-  # Install missing skills, grouped by source to minimize npx calls
+  # Install missing skills, grouped by source in a single jq pass
   if [ -n "$to_install" ]; then
     echo ""
     echo "Installing..."
 
-    # Build a map of source → skill names
-    local sources_seen=()
-    while IFS= read -r skill; do
-      [ -z "$skill" ] && continue
-      local source
-      source=$(echo "$remote_lock" | jq -r ".skills[\"$skill\"].source")
-
-      # Collect all skills needed from this source
-      local skills_for_source
-      skills_for_source=$(echo "$to_install" | while IFS= read -r s; do
-        [ -z "$s" ] && continue
-        s_source=$(echo "$remote_lock" | jq -r ".skills[\"$s\"].source")
-        if [ "$s_source" = "$source" ]; then
-          echo "$s"
-        fi
-      done | tr '\n' ' ')
-
-      # Skip if we already processed this source
-      local already_done=false
-      for seen in "${sources_seen[@]:-}"; do
-        if [ "$seen" = "$source" ]; then
-          already_done=true
-          break
-        fi
-      done
-      if [ "$already_done" = true ]; then
+    while IFS=$'\t' read -r source skills_for_source; do
+      [ -z "$source" ] && continue
+      if [ "$source" = "null" ]; then
+        echo "  Warning: Skipping skills with no source: $skills_for_source"
         continue
       fi
-      sources_seen+=("$source")
 
       echo "  From $source: $skills_for_source"
+      # shellcheck disable=SC2086
       npx skills add "$source" -g --skill $skills_for_source --agent '*' -y || \
         echo "  Warning: Failed to install from $source"
-    done <<< "$to_install"
+    done < <(
+      printf '%s\n' "$to_install" | jq -Rn --argjson lock "$remote_lock" '
+        [inputs | select(length > 0)] as $skills
+        | $skills
+        | map({skill: ., source: $lock.skills[.].source})
+        | group_by(.source)[]
+        | [(.[0].source // "null"), (map(.skill) | join(" "))]
+        | @tsv
+      '
+    )
 
     echo "Done."
   fi
+
+  # Update local lock file with remote
+  echo "$remote_lock" > "$LOCK_FILE"
 }
 
 cmd_status() {
@@ -210,8 +200,8 @@ cmd_status() {
   while IFS= read -r skill; do
     [ -z "$skill" ] && continue
     local local_hash remote_hash
-    local_hash=$(jq -r ".skills[\"$skill\"].skillFolderHash" "$LOCK_FILE")
-    remote_hash=$(echo "$remote_lock" | jq -r ".skills[\"$skill\"].skillFolderHash")
+    local_hash=$(jq -r --arg skill "$skill" '.skills[$skill].skillFolderHash' "$LOCK_FILE")
+    remote_hash=$(echo "$remote_lock" | jq -r --arg skill "$skill" '.skills[$skill].skillFolderHash')
     if [ "$local_hash" != "$remote_hash" ]; then
       changed+="  ~ $skill (hash differs)\n"
     fi
