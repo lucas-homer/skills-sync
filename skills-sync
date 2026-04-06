@@ -140,7 +140,7 @@ cmd_pull() {
 
       echo "  From $source: $skills_for_source"
       # shellcheck disable=SC2086
-      npx --yes skills add "$source" -g --skill $skills_for_source --agent '*' -y || \
+      npx --yes skills add "$source" -g --skill $skills_for_source --agent '*' -y </dev/null || \
         echo "  Warning: Failed to install from $source"
     done < <(
       printf '%s\n' "$to_install" | jq -rRn --argjson lock "$remote_lock" '
