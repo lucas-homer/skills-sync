@@ -84,11 +84,6 @@ cmd_push() {
 }
 
 cmd_pull() {
-  local prune=false
-  if [ "${1:-}" = "--prune" ]; then
-    prune=true
-  fi
-
   local gist_id
   gist_id=$(read_gist_id)
 
@@ -96,52 +91,46 @@ cmd_pull() {
   local remote_lock
   remote_lock=$(gh gist view "$gist_id" --filename ".skill-lock.json" --raw)
 
-  if [ ! -f "$LOCK_FILE" ]; then
-    echo "No local lock file. Creating from remote..."
-    echo "$remote_lock" > "$LOCK_FILE"
-  fi
-
-  # Find skills in remote but not local → install
+  # Show what will change
   local remote_skills local_skills
   remote_skills=$(echo "$remote_lock" | jq -r '.skills | keys[]' | sort)
-  local_skills=$(jq -r '.skills | keys[]' "$LOCK_FILE" | sort)
+  if [ -f "$LOCK_FILE" ]; then
+    local_skills=$(jq -r '.skills | keys[]' "$LOCK_FILE" | sort)
+  else
+    local_skills=""
+  fi
 
-  local to_install
-  to_install=$(comm -23 <(echo "$remote_skills") <(echo "$local_skills"))
-  local local_only
-  local_only=$(comm -13 <(echo "$remote_skills") <(echo "$local_skills"))
+  local to_install local_only
+  to_install=$(comm -23 <(echo "$remote_skills") <(echo "$local_skills") || true)
+  local_only=$(comm -13 <(echo "$remote_skills") <(echo "$local_skills") || true)
 
   if [ -n "$to_install" ]; then
-    echo "Installing missing skills..."
+    echo "Skills to install:"
     while IFS= read -r skill; do
       [ -z "$skill" ] && continue
-      local source
-      source=$(echo "$remote_lock" | jq -r ".skills[\"$skill\"].source")
-      echo "  Installing: $skill (from $source)"
-      npx skills add "$source" || echo "  Warning: Failed to install $skill"
+      echo "  + $skill"
     done <<< "$to_install"
-  else
-    echo "All remote skills are installed locally."
   fi
 
   if [ -n "$local_only" ]; then
-    if [ "$prune" = true ]; then
-      echo "Pruning local-only skills..."
-      while IFS= read -r skill; do
-        [ -z "$skill" ] && continue
-        echo "  Removing: $skill"
-        npx skills remove "$skill" || echo "  Warning: Failed to remove $skill"
-      done <<< "$local_only"
-    else
-      echo ""
-      echo "Local-only skills (not in remote):"
-      while IFS= read -r skill; do
-        [ -z "$skill" ] && continue
-        echo "  - $skill"
-      done <<< "$local_only"
-      echo "Use 'skills-sync pull --prune' to remove them."
-    fi
+    echo "Local-only skills (not in remote):"
+    while IFS= read -r skill; do
+      [ -z "$skill" ] && continue
+      echo "  - $skill"
+    done <<< "$local_only"
   fi
+
+  if [ -z "$to_install" ] && [ -z "$local_only" ]; then
+    echo "Already in sync."
+    return
+  fi
+
+  # Overwrite local lock file with remote and restore
+  echo ""
+  echo "Updating lock file and installing..."
+  echo "$remote_lock" > "$LOCK_FILE"
+  npx skills experimental_install
+  echo "Done."
 }
 
 cmd_status() {
@@ -229,7 +218,7 @@ skills-sync — keep your agent skills in sync across machines
 Usage:
   skills-sync init [<gist-id>]   Initialize sync (create or link to a gist)
   skills-sync push               Upload local lock file to gist
-  skills-sync pull [--prune]     Download remote lock file and install missing skills
+  skills-sync pull               Download remote lock file and install missing skills
   skills-sync status             Show diff between local and remote
   skills-sync add <source>       Install a skill and push the updated lock file
 
@@ -237,7 +226,7 @@ Examples:
   skills-sync init                    # First machine: create gist
   skills-sync init abc123def456       # Other machines: link to existing gist
   skills-sync add anthropics/skills   # Install + sync
-  skills-sync pull                    # Sync from remote
+  skills-sync pull                     # Sync from remote
 HELP
 }
 
